@@ -134,6 +134,7 @@ COMMAND_HANDLER(aurix_ocds_init) {
     if (!ocds->tap->enabled)
       continue;
 
+#if BUILD_TAS_CLIENT
     if (transport_is_tas()) {
       ocds->ops = adapter_driver->tas_ops;
       int err = ocds->ops->connect(ocds);
@@ -141,6 +142,7 @@ COMMAND_HANDLER(aurix_ocds_init) {
         return err;
       }
     }
+#endif
   }
 
   return JIM_OK;

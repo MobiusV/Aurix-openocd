@@ -57,7 +57,7 @@ int tas_client_session_start(int sock, const char *device, uint8_t con_id,
   rq_session_start.cmd = TAS_PL1_CMD_SESSION_START;
   rq_session_start.con_id = con_id;
   rq_session_start.client_type = TAS_CLIENT_TYPE_RW;
-  strncpy(rq_session_start.identifier, device, TAS_NAME_LEN64);
+  strncpy(rq_session_start.identifier, device, TAS_NAME_LEN64-1);
   snprintf(rq_session_start.session_name, TAS_NAME_LEN16, "openocd%u", con_id);
   rq_session_start.session_pw[0] = 0;
 

@@ -6,6 +6,8 @@
 #include <jtag/jtag.h>
 #include <stdatomic.h>
 
+#define AURIX_OCDS_MAX_HW_TRIGGERS 8
+
 struct aurix_ocds {
   const char *name;
   struct list_head lh;

@@ -23,7 +23,8 @@
 #include "jtag.h"
 #include "swd.h"
 #include "interface.h"
-#include <transport/transport.h>
+//#include <transport/transport.h>
+#include "../transport/transport.h"
 #include <helper/jep106.h>
 #include "helper/system.h"
 
@@ -1852,7 +1853,11 @@ int adapter_resets(int trst, int srst)
 		return ERROR_OK;
 	} else if (transport_is_swd() || transport_is_hla() ||
 			   transport_is_dapdirect_swd() || transport_is_dapdirect_jtag() ||
-			   transport_is_swim() || transport_is_tas()) {
+			   transport_is_swim()
+#if BUILD_TAS_CLIENT
+		   || transport_is_tas()
+#endif
+		   ) {
 		if (trst == TRST_ASSERT) {
 			LOG_ERROR("transport %s has no trst signal",
 				get_current_transport()->name);
@@ -1886,7 +1891,11 @@ int adapter_assert_reset(void)
 		return ERROR_OK;
 	} else if (transport_is_swd() || transport_is_hla() ||
 			   transport_is_dapdirect_jtag() || transport_is_dapdirect_swd() ||
-			   transport_is_swim() || transport_is_tas())
+			   transport_is_swim()
+#if BUILD_TAS_CLIENT
+		   || transport_is_tas()
+#endif
+		   )
 		return adapter_system_reset(1);
 	else if (get_current_transport())
 		LOG_ERROR("reset is not supported on %s",
@@ -1903,7 +1912,11 @@ int adapter_deassert_reset(void)
 		return ERROR_OK;
 	} else if (transport_is_swd() || transport_is_hla() ||
 			   transport_is_dapdirect_jtag() || transport_is_dapdirect_swd() ||
-			   transport_is_swim() || transport_is_tas())
+			   transport_is_swim()
+#if BUILD_TAS_CLIENT
+		   || transport_is_tas()
+#endif
+		   )
 		return adapter_system_reset(0);
 	else if (get_current_transport())
 		LOG_ERROR("reset is not supported on %s",

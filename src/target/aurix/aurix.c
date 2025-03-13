@@ -4,6 +4,7 @@
 #include "jtag/tas.h"
 #include "target/aurix/aurix_ocds.h"
 #include "target/register.h"
+#include "target/breakpoints.h"
 #include <assert.h>
 #include <stdlib.h>
 #include <time.h>
@@ -18,9 +19,96 @@
 
 #include "aurix.h"
 
-#define DBGSR_HALT (1 << 1)
-#define DBGSR_HALT_SET (3 << 1)
+enum gdb_regno {
+  GDB_REGNO_D0 = 0,
+  GDB_REGNO_D1 = 1,
+  GDB_REGNO_D15 = 15,
+  GDB_REGNO_A0 = 16,
+  GDB_REGNO_A15 = 31,
+  GDB_REGNO_LCX = 32,
+  GDB_REGNO_FCX = 33,
+  GDB_REGNO_PCX = 34,
+  GDB_REGNO_PSW = 35,
+  GDB_REGNO_PC = 36,
+};
+
+static const struct {
+  const char *const name;
+  uint16_t reg_offset;
+  bool caller_saved;
+} tricore_core_regs[] = {
+    {.name = "d0", .reg_offset = 0xFF00, .caller_saved = true},
+    {.name = "d1", .reg_offset = 0xFF04, .caller_saved = true},
+    {.name = "d2", .reg_offset = 0xFF08, .caller_saved = true},
+    {.name = "d3", .reg_offset = 0xFF0C, .caller_saved = true},
+    {.name = "d4", .reg_offset = 0xFF10, .caller_saved = true},
+    {.name = "d5", .reg_offset = 0xFF14, .caller_saved = true},
+    {.name = "d6", .reg_offset = 0xFF18, .caller_saved = true},
+    {.name = "d7", .reg_offset = 0xFF1C, .caller_saved = true},
+    {.name = "d8", .reg_offset = 0xFF20},
+    {.name = "d9", .reg_offset = 0xFF24},
+    {.name = "d10", .reg_offset = 0xFF28},
+    {.name = "d11", .reg_offset = 0xFF2C},
+    {.name = "d12", .reg_offset = 0xFF30},
+    {.name = "d13", .reg_offset = 0xFF34},
+    {.name = "d14", .reg_offset = 0xFF38},
+    {.name = "d15", .reg_offset = 0xFF3C},
+    {.name = "a0", .reg_offset = 0xFF80, .caller_saved = true},
+    {.name = "a1", .reg_offset = 0xFF84, .caller_saved = true},
+    {.name = "a2", .reg_offset = 0xFF88, .caller_saved = true},
+    {.name = "a3", .reg_offset = 0xFF8C, .caller_saved = true},
+    {.name = "a4", .reg_offset = 0xFF90, .caller_saved = true},
+    {.name = "a5", .reg_offset = 0xFF94, .caller_saved = true},
+    {.name = "a6", .reg_offset = 0xFF98, .caller_saved = true},
+    {.name = "a7", .reg_offset = 0xFF9C, .caller_saved = true},
+    {.name = "a8", .reg_offset = 0xFFA0, .caller_saved = true},
+    {.name = "a9", .reg_offset = 0xFFA4, .caller_saved = true},
+    {.name = "a10", .reg_offset = 0xFFA8},
+    {.name = "a11", .reg_offset = 0xFFAC},
+    {.name = "a12", .reg_offset = 0xFFB0},
+    {.name = "a13", .reg_offset = 0xFFB4},
+    {.name = "a14", .reg_offset = 0xFFB8},
+    {.name = "a15", .reg_offset = 0xFFBC},
+    {.name = "LCX", .reg_offset = 0xfe3c},
+    {.name = "FCX", .reg_offset = 0xfe38},
+    {.name = "PCX", .reg_offset = 0xFE00},
+    {.name = "PSW", .reg_offset = 0xFE04},
+    {.name = "PC", .reg_offset = 0xFE08},
+    {.name = "ICR", .reg_offset = 0xfe2c},
+    {.name = "ISP", .reg_offset = 0xfe28},
+    {.name = "BTV", .reg_offset = 0xfe24},
+    {.name = "BIV", .reg_offset = 0xfe20},
+    {.name = "SYSCON", .reg_offset = 0xfe14},
+    {.name = "PMUCON0", .reg_offset = 0},
+    {.name = "DMUCON", .reg_offset = 0},
+};
+
+//
+#define DBGSR_EVTSRC_MASK (0x1f << 8)
+#define DBGSR_EVTSRC_SHIFT 8
+
+#define DBGSR_HALT       (1 << 1)
+#define DBGSR_HALT_SET   (3 << 1)
 #define DBGSR_HALT_RESET (2 << 1)
+
+//
+#define TRxEVT_ALD            (1 << 28)
+#define TRxEVT_AST            (1 << 27)
+
+#define TRxEVT_RNG            (1 << 13)
+  
+#define TRxEVT_TYP_ADDRESS    (0 << 12)
+#define TRxEVT_TYP_PC         (1 << 12)
+
+#define TRxEVT_BOD            (1 << 4)
+#define TRxEVT_BBM            (1 << 3)
+
+#define TRxEVT_EVTA_DISABLED  (0x0 << 0)
+#define TRxEVT_EVTA_NONE      (0x1 << 0)
+#define TRxEVT_EVTA_HALT      (0x2 << 0)
+#define TRxEVT_EVTA_BKPT_TRAP (0x3 << 0)
+
+int aurix_reg_get(struct reg *reg);
 
 static int aurix_read_dbgsr(struct target *target, uint32_t *debug_sr) {
   struct aurix_private_config *aurix = target_to_aurix(target);
@@ -36,15 +124,196 @@ static int aurix_read_syscon(struct target *target, uint32_t *syscon) {
       aurix->ocds, 0xF8810000 + 0x20000 * target->coreid + 0xFE14, syscon);
 }
 
-static int tricore_breakpoints_clear(struct target *target) {
-  /* Clear out any existing breakpoints */
-  uint8_t trig[16 * 4];
-  memset(trig, 0, 16 * 4);
-  return target_write_memory(
-      target, 0xF8810000 + 0x20000 * target->coreid + 0xF000, 4, 16, trig);
+static int tricore_trigger_set_entry(struct target *target, int entry, uint32_t evt, uint32_t adr) {
+  if (entry >= AURIX_OCDS_MAX_HW_TRIGGERS) return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+
+  // TRiEVT/TRuADR
+  uint32_t evt_addr = 0xF8810000 + 0x20000 * target->coreid + 0xF000;
+  int ret1, ret2;
+  unsigned entry_offset = evt_addr + entry*8;
+
+  ret1 = target_write_u32(target, entry_offset + 0, evt);
+  ret2 = target_write_u32(target, entry_offset + 4, adr);
+
+  if (ret1 != ERROR_OK) return ret1;
+  if (ret2 != ERROR_OK) return ret2;
+  
+  return ERROR_OK;
+}
+
+static int tricore_triggers_clear(struct target *target) {
+
+  for (int entry = 0; entry < AURIX_OCDS_MAX_HW_TRIGGERS; entry++) {
+    tricore_trigger_set_entry(target, entry, 0x0, 0x0);
+  }
+
+  return ERROR_OK;
+}
+
+/**
+ * @brief Turn the list of 'watchpoints' into a valid set of OCDS triggers.
+ */
+static int tricore_triggers_set(struct target *target) {
+  struct aurix_private_config *aurix = target_to_aurix(target);
+  int ret;
+
+  int entry = 0;
+  for (int i = 0; i < AURIX_OCDS_MAX_HW_TRIGGERS; i++) {
+    // skip empty slots
+    if (aurix->hw_watch[i].active == 0) continue;
+    
+    // set known pc breakpoints
+    if (aurix->hw_watch[i].is_execute) {
+      uint32_t evt, adr;
+    
+      evt = TRxEVT_BOD | TRxEVT_EVTA_HALT | TRxEVT_TYP_PC;
+      adr = aurix->hw_watch[i].addr;
+
+      aurix->trig_index[entry] = i;
+      
+      ret = tricore_trigger_set_entry(target, entry, evt, adr);
+      if (ret != ERROR_OK) return ret;
+      entry++;
+    }
+
+    // this is simplistic.  needs to handle ranges.
+    if ((aurix->hw_watch[i].is_read || aurix->hw_watch[i].is_write)) {
+      uint32_t evt, adr;
+    
+      evt = TRxEVT_BOD | TRxEVT_EVTA_HALT | TRxEVT_TYP_ADDRESS;
+      adr = aurix->hw_watch[i].addr;
+
+      if (aurix->hw_watch[i].is_read) evt |= TRxEVT_ALD;
+      if (aurix->hw_watch[i].is_write) evt |= TRxEVT_AST;
+
+      aurix->trig_index[entry] = i;
+
+      ret = tricore_trigger_set_entry(target, entry, evt, adr);
+      if (ret != ERROR_OK) return ret;
+      entry++;
+
+      // handle ranges.
+      if (aurix->hw_watch[i].len > 1) {
+
+	// fix last entry - should be on "even" offset
+	evt |= TRxEVT_RNG;
+
+	if ((entry & 1) == 0) {
+	  // skip an entry to make the first one even
+	  tricore_trigger_set_entry(target, entry-1, 0x0, 0x0);
+	  ret = tricore_trigger_set_entry(target, entry, evt, adr);
+	  entry++;
+	} else {
+	  // first one was even, we're ok.
+	  ret = tricore_trigger_set_entry(target, entry-1, evt, adr);
+	}
+	    
+	if (ret != ERROR_OK) return ret;
+
+	// 2nd entry - should be on "odd" offset
+	evt = TRxEVT_BOD | TRxEVT_EVTA_HALT | TRxEVT_TYP_ADDRESS;
+	adr = aurix->hw_watch[i].addr + aurix->hw_watch[i].len-1;
+
+	if (aurix->hw_watch[i].is_read) evt |= TRxEVT_ALD;
+	if (aurix->hw_watch[i].is_write) evt |= TRxEVT_AST;
+
+	aurix->trig_index[entry] = i;
+
+	ret = tricore_trigger_set_entry(target, entry, evt, adr);
+	if (ret != ERROR_OK) return ret;
+	entry++;
+      } // range
+    } // r/w watchpoint
+  }
+
+  // clear remaining entres
+  for (; entry < AURIX_OCDS_MAX_HW_TRIGGERS; entry++) {
+    ret = tricore_trigger_set_entry(target, entry, 0x0, 0x0);
+    if (ret != ERROR_OK) return ret;
+  }
+  
+  return ERROR_OK;
+}
+
+int tricore_add_breakpoint_pc(struct target *target, uint32_t pc, int id) {
+  struct aurix_private_config *aurix = target_to_aurix(target);
+
+  int space = 0;
+  for (int entry = 0; entry < AURIX_OCDS_MAX_HW_TRIGGERS; entry++) {
+    // empty slot?
+    if (aurix->hw_watch[entry].active == 0) {
+      aurix->hw_watch[entry].is_execute = 1;
+      aurix->hw_watch[entry].addr = pc;
+      aurix->hw_watch[entry].unique_id = id;
+      aurix->hw_watch[entry].active = 1;
+      space++;
+      break;
+    }
+  }
+
+  if (space == 0) {
+    return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+  }
+
+  return ERROR_OK;
+}
+
+int tricore_remove_trigger(struct target *target, int id) {
+  struct aurix_private_config *aurix = target_to_aurix(target);
+
+  // look for the id
+  int hit = 0;
+  for (int e = 0; e < AURIX_OCDS_MAX_HW_TRIGGERS; e++) {
+    if (aurix->hw_watch[e].active && aurix->hw_watch[e].unique_id == id) {
+      aurix->hw_watch[e].active = 0;
+      hit++;
+      break;
+    }
+  }
+
+  if (hit == 0) {
+    return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+  }
+  
+  return ERROR_OK;
+}
+
+int tricore_add_watchpoint(struct target *target,
+			   uint32_t addr, int len,
+			   uint32_t mask, uint32_t value,
+			   int is_read,
+			   int is_write,
+			   int is_execute,
+			   int id) {
+  struct aurix_private_config *aurix = target_to_aurix(target);
+
+  int space = 0;
+  for (int entry = 0; entry < AURIX_OCDS_MAX_HW_TRIGGERS; entry++) {
+    // empty slot?
+    if (aurix->hw_watch[entry].active == 0) {
+      aurix->hw_watch[entry].is_execute = 0;
+      aurix->hw_watch[entry].is_read = is_read;
+      aurix->hw_watch[entry].is_write = is_write;
+      aurix->hw_watch[entry].addr = addr;
+      aurix->hw_watch[entry].len = len;
+      aurix->hw_watch[entry].mask = mask;
+      aurix->hw_watch[entry].mask = value;
+      aurix->hw_watch[entry].unique_id = id;
+      aurix->hw_watch[entry].active = 1;
+      space++;
+      break;
+    }
+  }
+
+  if (space == 0) {
+    return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+  }
+
+  return ERROR_OK;
 }
 
 static int aurix_poll(struct target *target) {
+  struct aurix_private_config *aurix = target_to_aurix(target);
   enum target_state prev_target_state;
   int ret = ERROR_OK;
   uint32_t dbgsr;
@@ -58,11 +327,31 @@ static int aurix_poll(struct target *target) {
   if (ret != ERROR_OK)
     return ret;
 
-  if (syscon & (1 << 24)) {
+#define SYSCON_BHALT (1 << 24)
+  
+  if (syscon & SYSCON_BHALT) {
     target->state = TARGET_HALTED;
     return ERROR_OK;
   }
 
+  // if we just single stepped, note that.
+  if (aurix->single_stepped) {
+    aurix->single_stepped = 0;
+    target->debug_reason = DBG_REASON_SINGLESTEP;
+  }
+
+  // check for triggers
+  unsigned evtsrc = (dbgsr & DBGSR_EVTSRC_MASK) >> DBGSR_EVTSRC_SHIFT;
+  if (evtsrc >= 16) {
+    // map the trigger back to the source spec
+    int watch_index = aurix->trig_index[evtsrc - 16];
+    if (aurix->hw_watch[watch_index].is_execute)
+      target->debug_reason = DBG_REASON_BREAKPOINT;
+    else
+      target->debug_reason = DBG_REASON_WATCHPOINT;
+  }
+
+  // if we're halted
   if (dbgsr & DBGSR_HALT) {
     prev_target_state = target->state;
     if (prev_target_state != TARGET_HALTED) {
@@ -121,6 +410,7 @@ int aurix_halt(struct target *target) {
     return ERROR_OK;
   }
 
+  // DBGSR
   ret = target_write_u32(target, 0xF8810000 + 0x20000 * target->coreid + 0xFD00,
                          DBGSR_HALT_SET);
   if (ret) {
@@ -132,6 +422,7 @@ int aurix_halt(struct target *target) {
 
   return ret;
 }
+
 /* See target.c target_resume() for documentation. */
 int aurix_resume(struct target *target, int current, target_addr_t address,
                  int handle_breakpoints, int debug_execution) {
@@ -143,6 +434,8 @@ int aurix_resume(struct target *target, int current, target_addr_t address,
   }
 
   if (current) {
+    tricore_triggers_set(target);
+    
     ret =
         target_write_u32(target, 0xF8810000 + 0x20000 * target->coreid + 0xFD00,
                          DBGSR_HALT_RESET);
@@ -176,8 +469,44 @@ int aurix_resume(struct target *target, int current, target_addr_t address,
 
 int aurix_step(struct target *target, int current, target_addr_t address,
                int handle_breakpoints) {
-  return ERROR_FAIL;
+  struct aurix_private_config *aurix = target_to_aurix(target);
+  uint32_t trig[16];
+
+  tricore_triggers_clear(target);
+
+  // trigger on any pc
+  // write tr0evtr, tr0adr, tr1evt, tr1adr
+  trig[0] = TRxEVT_BOD | TRxEVT_EVTA_HALT | TRxEVT_TYP_PC | TRxEVT_RNG;
+  trig[1] = 0x00000000;
+  trig[2] = TRxEVT_BOD | TRxEVT_EVTA_HALT | TRxEVT_TYP_PC;
+  trig[3] = 0xffffffff;
+
+  int ret;
+  ret = tricore_trigger_set_entry(target, 0, trig[0], trig[1]);
+  ret = tricore_trigger_set_entry(target, 1, trig[2], trig[3]);
+
+  //
+  register_cache_invalidate(target->reg_cache);
+
+  // let go
+  ret = target_write_u32(target, 0xF8810000 + 0x20000 * target->coreid + 0xFD00, DBGSR_HALT_RESET);
+  if (ret) {
+    LOG_TARGET_ERROR(target, "Failed to continue target");
+    return ret;
+  }
+
+  // update regs
+  int num_regs = ARRAY_SIZE(tricore_core_regs);
+  for (int i = 0; i < num_regs; i++) {
+    ret = aurix_reg_get(&target->reg_cache->reg_list[i]);
+  }
+  
+  LOG_USER("PC = 0x%08x", buf_get_u32(target->reg_cache->reg_list[GDB_REGNO_PC].value, 0, 32));
+  aurix->single_stepped = 1;
+  
+  return ERROR_OK;
 }
+
 /* target reset control. assert reset can be invoked when OpenOCD and
  * the target is out of sync.
  *
@@ -265,7 +594,7 @@ int aurix_deassert_reset(struct target *target) {
 
   if (target->reset_halt) {
     /* Breakpoints clear */
-    tricore_breakpoints_clear(target);
+    tricore_triggers_clear(target);
 
     if (target->state != TARGET_HALTED) {
       LOG_TARGET_WARNING(target, "ran after reset and before halt ...");
@@ -281,6 +610,7 @@ int aurix_deassert_reset(struct target *target) {
 
   return ERROR_OK;
 }
+
 int aurix_soft_reset_halt(struct target *target) { return ERROR_FAIL; }
 
 /**
@@ -312,7 +642,7 @@ int aurix_get_gdb_reg_list(struct target *target, struct reg **reg_list[],
   switch (reg_class) {
   case REG_CLASS_ALL:
   case REG_CLASS_GENERAL:
-    *reg_list_size = 35;
+    *reg_list_size = 44;
     *reg_list = malloc(sizeof(struct reg *) * (*reg_list_size));
 
     int i;
@@ -333,6 +663,7 @@ int aurix_get_gdb_reg_list(struct target *target, struct reg **reg_list[],
 int aurix_get_gdb_reg_list_noread(struct target *target,
                                   struct reg **reg_list[], int *reg_list_size,
                                   enum target_register_class reg_class) {
+  printf("aurix_get_gdb_reg_list_noread()\n");
   return ERROR_FAIL;
 }
 
@@ -397,6 +728,7 @@ int aurix_checksum_memory(struct target *target, target_addr_t address,
                           uint32_t count, uint32_t *checksum) {
   return ERROR_FAIL;
 }
+
 int aurix_blank_check_memory(struct target *target,
                              struct target_memory_check_block *blocks,
                              int num_blocks, uint8_t erased_value) {
@@ -416,16 +748,36 @@ int aurix_blank_check_memory(struct target *target,
  * Upon GDB connection all breakpoints/watchpoints are cleared.
  */
 int aurix_add_breakpoint(struct target *target, struct breakpoint *breakpoint) {
+  if (breakpoint->type == BKPT_SOFT) {
+    LOG_INFO("aurix only supports hardware breakpoints.");
+    return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+  } else if (breakpoint->type == BKPT_HARD) {
+
+    if (breakpoint->length != 4) {
+      LOG_ERROR("Invalid breakpoint length %d", breakpoint->length);
+      return ERROR_FAIL;
+    }
+
+    if ((breakpoint->address % 2) != 0) {
+      LOG_ERROR("Invalid breakpoint alignment for address 0x%" TARGET_PRIxADDR, breakpoint->address);
+      return ERROR_FAIL;
+    }
+
+    return tricore_add_breakpoint_pc(target, breakpoint->address, breakpoint->unique_id);
+  }
+  
   return ERROR_FAIL;
 }
-int aurix_add_context_breakpoint(struct target *target,
-                                 struct breakpoint *breakpoint) {
-  return ERROR_FAIL;
-}
-int aurix_add_hybrid_breakpoint(struct target *target,
-                                struct breakpoint *breakpoint) {
-  return ERROR_FAIL;
-}
+
+//int aurix_add_context_breakpoint(struct target *target,
+//                                 struct breakpoint *breakpoint) {
+//  return ERROR_FAIL;
+//}
+//
+//int aurix_add_hybrid_breakpoint(struct target *target,
+//                                struct breakpoint *breakpoint) {
+//  return ERROR_FAIL;
+//}
 
 /* remove breakpoint. hw will only be updated if the target
  * is currently halted.
@@ -433,12 +785,25 @@ int aurix_add_hybrid_breakpoint(struct target *target,
  */
 int aurix_remove_breakpoint(struct target *target,
                             struct breakpoint *breakpoint) {
-  return ERROR_FAIL;
+  if (breakpoint->type == BKPT_SOFT) {
+    LOG_INFO("aurix only supports hardware breakpoints.");
+    return ERROR_TARGET_RESOURCE_NOT_AVAILABLE;
+  } else if (breakpoint->type == BKPT_HARD) {
+    return tricore_remove_trigger(target, breakpoint->unique_id);
+  }
+  
+  return ERROR_OK;
 }
 
 /* add watchpoint ... see add_breakpoint() comment above. */
 int aurix_add_watchpoint(struct target *target, struct watchpoint *watchpoint) {
-  return ERROR_FAIL;
+  return tricore_add_watchpoint(target,
+				watchpoint->address, watchpoint->length,
+				watchpoint->mask, watchpoint->value,
+				watchpoint->rw == WPT_READ || watchpoint->rw == WPT_ACCESS,
+				watchpoint->rw == WPT_WRITE || watchpoint->rw == WPT_ACCESS,
+				0,
+				watchpoint->unique_id);
 }
 
 /* remove watchpoint. hw will only be updated if the target
@@ -447,7 +812,7 @@ int aurix_add_watchpoint(struct target *target, struct watchpoint *watchpoint) {
  */
 int aurix_remove_watchpoint(struct target *target,
                             struct watchpoint *watchpoint) {
-  return ERROR_FAIL;
+  return tricore_remove_trigger(target, watchpoint->unique_id);
 }
 
 /* Find out just hit watchpoint. After the target hits a watchpoint, the
@@ -469,6 +834,7 @@ int aurix_run_algorithm(struct target *target, int num_mem_params,
                         void *arch_info) {
   return ERROR_FAIL;
 }
+
 int aurix_start_algorithm(struct target *target, int num_mem_params,
                           struct mem_param *mem_params, int num_reg_params,
                           struct reg_param *reg_param,
@@ -476,6 +842,7 @@ int aurix_start_algorithm(struct target *target, int num_mem_params,
                           void *arch_info) {
   return ERROR_FAIL;
 }
+
 int aurix_wait_algorithm(struct target *target, int num_mem_params,
                          struct mem_param *mem_params, int num_reg_params,
                          struct reg_param *reg_param, target_addr_t exit_point,
@@ -603,57 +970,17 @@ int aurix_examine(struct target *target) {
     target_set_examined(target);
   }
 
-  tricore_breakpoints_clear(target);
+  tricore_triggers_clear(target);
 
   return ERROR_OK;
 }
-
-static const struct {
-  const char *const name;
-  uint16_t reg_offset;
-  bool caller_saved;
-} tricore_core_regs[] = {
-    {.name = "d0", .reg_offset = 0xFF00, .caller_saved = true},
-    {.name = "d1", .reg_offset = 0xFF04, .caller_saved = true},
-    {.name = "d2", .reg_offset = 0xFF08, .caller_saved = true},
-    {.name = "d3", .reg_offset = 0xFF0C, .caller_saved = true},
-    {.name = "d4", .reg_offset = 0xFF10, .caller_saved = true},
-    {.name = "d5", .reg_offset = 0xFF14, .caller_saved = true},
-    {.name = "d6", .reg_offset = 0xFF18, .caller_saved = true},
-    {.name = "d7", .reg_offset = 0xFF1C, .caller_saved = true},
-    {.name = "d8", .reg_offset = 0xFF20},
-    {.name = "d9", .reg_offset = 0xFF24},
-    {.name = "d10", .reg_offset = 0xFF28},
-    {.name = "d11", .reg_offset = 0xFF2C},
-    {.name = "d12", .reg_offset = 0xFF30},
-    {.name = "d13", .reg_offset = 0xFF34},
-    {.name = "d14", .reg_offset = 0xFF38},
-    {.name = "d15", .reg_offset = 0xFF3C},
-    {.name = "a0", .reg_offset = 0xFF80, .caller_saved = true},
-    {.name = "a1", .reg_offset = 0xFF84, .caller_saved = true},
-    {.name = "a2", .reg_offset = 0xFF88, .caller_saved = true},
-    {.name = "a3", .reg_offset = 0xFF8C, .caller_saved = true},
-    {.name = "a4", .reg_offset = 0xFF90, .caller_saved = true},
-    {.name = "a5", .reg_offset = 0xFF94, .caller_saved = true},
-    {.name = "a6", .reg_offset = 0xFF98, .caller_saved = true},
-    {.name = "a7", .reg_offset = 0xFF9C, .caller_saved = true},
-    {.name = "a8", .reg_offset = 0xFFA0, .caller_saved = true},
-    {.name = "a9", .reg_offset = 0xFFA4, .caller_saved = true},
-    {.name = "a10", .reg_offset = 0xFFA8},
-    {.name = "a11", .reg_offset = 0xFFAC},
-    {.name = "a12", .reg_offset = 0xFFB0},
-    {.name = "a13", .reg_offset = 0xFFB4},
-    {.name = "a14", .reg_offset = 0xFFB8},
-    {.name = "a15", .reg_offset = 0xFFBC},
-    {.name = "PCX", .reg_offset = 0xFE00},
-    {.name = "PSW", .reg_offset = 0xFE04},
-    {.name = "PC", .reg_offset = 0xFE08},
-};
 
 int aurix_reg_get(struct reg *reg) {
   struct tricore_reg *arch_reg = (struct tricore_reg *)reg->arch_info;
   struct target *target = arch_reg->target;
 
+  if (arch_reg->offset == 0) return ERROR_OK;
+  
   int ret = target_read_buffer(
       target, 0xF8810000 + 0x20000 * target->coreid + arch_reg->offset, 4,
       arch_reg->value);
