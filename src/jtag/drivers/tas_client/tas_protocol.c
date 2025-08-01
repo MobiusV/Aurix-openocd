@@ -1,14 +1,16 @@
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
-#include <sys/param.h>
-#include <sys/socket.h>
 #include <time.h>
-#include <unistd.h>
 
 #include "helper/log.h"
 #include "tas_pkt.h"
-
+#include "tas_sock.h"
+ 
+#ifndef MIN
+#define MIN(a, b) (((a) < (b)) ? (a) : (b))
+#endif
+ 
 int tas_client_connect(int sock) {
   tas_pl1rq_server_connect_st rq_server_connect;
   tas_pl1rsp_server_connect_st rsp_server_connect;
@@ -19,22 +21,22 @@ int tas_client_connect(int sock) {
   rq_server_connect.cmd = TAS_PL1_CMD_SERVER_CONNECT;
   rq_server_connect.reserved = 0;
   snprintf(rq_server_connect.client_name, TAS_NAME_LEN32, "openocd");
-  getlogin_r(rq_server_connect.user_name, TAS_NAME_LEN16);
-  rq_server_connect.client_pid = getpid();
-
-  if (send(sock, &packet_size, 4, MSG_MORE) < 0) {
-    return ERROR_FAIL;
+  tas_get_login(rq_server_connect.user_name, TAS_NAME_LEN16);
+  rq_server_connect.client_pid = tas_get_pid();
+ 
+  if (tas_sock_send(sock, &packet_size, 4, 0) < 0) {
+  	return ERROR_FAIL;
   }
-  if (send(sock, &rq_server_connect, sizeof(tas_pl1rq_server_connect_st), 0) <
-      0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &rq_server_connect, sizeof(tas_pl1rq_server_connect_st), 0) <
+  	0) {
+  	return ERROR_FAIL;
   }
-
-  if (recv(sock, &packet_size, 4, 0) != 4) {
-    return ERROR_FAIL;
+ 
+  if (tas_sock_recv(sock, &packet_size, 4, 0) != 4) {
+  	return ERROR_FAIL;
   }
-  if (recv(sock, &rsp_server_connect, sizeof(tas_pl1rsp_server_connect_st), 0) <
-      0) {
+  if (tas_sock_recv(sock, &rsp_server_connect, sizeof(tas_pl1rsp_server_connect_st), 0) <
+  	0) {
     return ERROR_FAIL;
   }
 
@@ -61,19 +63,19 @@ int tas_client_session_start(int sock, const char *device, uint8_t con_id,
   snprintf(rq_session_start.session_name, TAS_NAME_LEN16, "openocd%u", con_id);
   rq_session_start.session_pw[0] = 0;
 
-  if (send(sock, &packet_size, 4, MSG_MORE) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &packet_size, 4, 0) < 0) {
+  	return ERROR_FAIL;
   }
-  if (send(sock, &rq_session_start, sizeof(tas_pl1rq_session_start_st), 0) <
-      0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &rq_session_start, sizeof(tas_pl1rq_session_start_st), 0) <
+  	0) {
+  	return ERROR_FAIL;
   }
-
-  if (recv(sock, &packet_size, 4, 0) != 4) {
-    return ERROR_FAIL;
+ 
+  if (tas_sock_recv(sock, &packet_size, 4, 0) != 4) {
+  	return ERROR_FAIL;
   }
-  if (recv(sock, &rsp_session_start, sizeof(tas_pl1rsp_session_start_st), 0) <
-      0) {
+  if (tas_sock_recv(sock, &rsp_session_start, sizeof(tas_pl1rsp_session_start_st), 0) <
+  	0) {
     return ERROR_FAIL;
   }
 
@@ -104,19 +106,19 @@ int tas_client_device_connect(int sock, tas_dev_con_feat_et dev_con_feat) {
   rq_device_connect.option = dev_con_feat;
   rq_device_connect.reserved1 = 0;
 
-  if (send(sock, &packet_size, 4, MSG_MORE) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &packet_size, 4, 0) < 0) {
+  	return ERROR_FAIL;
   }
-  if (send(sock, &rq_device_connect, sizeof(tas_pl1rq_device_connect_st), 0) <
-      0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &rq_device_connect, sizeof(tas_pl1rq_device_connect_st), 0) <
+  	0) {
+  	return ERROR_FAIL;
   }
-
-  if (recv(sock, &packet_size, 4, 0) != 4) {
-    return ERROR_FAIL;
+ 
+  if (tas_sock_recv(sock, &packet_size, 4, 0) != 4) {
+  	return ERROR_FAIL;
   }
-  if (recv(sock, &rsp_device_connect, sizeof(tas_pl1rsp_device_connect_st), 0) <
-      0) {
+  if (tas_sock_recv(sock, &rsp_device_connect, sizeof(tas_pl1rsp_device_connect_st), 0) <
+  	0) {
     return ERROR_FAIL;
   }
 
@@ -146,18 +148,18 @@ int tas_client_get_targets(int sock, tas_target_info_st **targets,
   rq_get_targets.wl = 0;
   rq_get_targets.start_index = 0;
 
-  if (send(sock, &packet_size, 4, MSG_MORE) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &packet_size, 4, 0) < 0) {
+  	return ERROR_FAIL;
   }
-  if (send(sock, &rq_get_targets, sizeof(tas_pl1rq_get_targets_st), 0) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &rq_get_targets, sizeof(tas_pl1rq_get_targets_st), 0) < 0) {
+  	return ERROR_FAIL;
   }
-
-  if (recv(sock, &packet_size, 4, 0) != 4) {
-    return ERROR_FAIL;
+ 
+  if (tas_sock_recv(sock, &packet_size, 4, 0) != 4) {
+  	return ERROR_FAIL;
   }
-  if (recv(sock, &rsp_get_targets, sizeof(tas_pl1rsp_get_targets_st), 0) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_recv(sock, &rsp_get_targets, sizeof(tas_pl1rsp_get_targets_st), 0) < 0) {
+  	return ERROR_FAIL;
   }
 
   if (rsp_get_targets.cmd != TAS_PL1_CMD_GET_TARGETS ||
@@ -175,10 +177,10 @@ int tas_client_get_targets(int sock, tas_target_info_st **targets,
     if (*targets == NULL) {
       return ERROR_FAIL;
     }
-    if (recv(sock, *targets, *target_num * sizeof(tas_target_info_st), 0) < 0) {
-      return ERROR_FAIL;
+    if (tas_sock_recv(sock, *targets, *target_num * sizeof(tas_target_info_st), 0) < 0) {
+    	return ERROR_FAIL;
     }
-  }
+   }
 
   return ERROR_OK;
 }
@@ -214,23 +216,23 @@ int tas_client_send_pl0(int sock, uint8_t con_id, uint32_t *pl0_buffer,
   tas_pl1rsp_pl0_start_st rsp_start;
   tas_pl1rsp_pl0_end_st rsp_end;
 
-  if (send(sock, &packet_size, 4, MSG_MORE) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &packet_size, 4, 0) < 0) {
+  	return ERROR_FAIL;
   }
-  if (send(sock, &rq_start, sizeof(tas_pl1rq_pl0_start_st), MSG_MORE) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &rq_start, sizeof(tas_pl1rq_pl0_start_st), 0) < 0) {
+  	return ERROR_FAIL;
   }
-  if (send(sock, pl0_buffer, pl0_len, MSG_MORE) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, pl0_buffer, pl0_len, 0) < 0) {
+  	return ERROR_FAIL;
   }
-  if (send(sock, &rq_end, sizeof(tas_pl1rq_pl0_end_st), 0) < 0) {
-    return ERROR_FAIL;
+  if (tas_sock_send(sock, &rq_end, sizeof(tas_pl1rq_pl0_end_st), 0) < 0) {
+  	return ERROR_FAIL;
   }
-
-  if (recv(sock, &packet_size, 4, 0) != 4) {
-    return ERROR_FAIL;
+ 
+  if (tas_sock_recv(sock, &packet_size, 4, 0) != 4) {
+  	return ERROR_FAIL;
   }
-  if (recv(sock, &rsp_start, sizeof(tas_pl1rsp_pl0_start_st), 0) < 0) {
+  if (tas_sock_recv(sock, &rsp_start, sizeof(tas_pl1rsp_pl0_start_st), 0) < 0) {
     return ERROR_FAIL;
   }
 
@@ -238,28 +240,28 @@ int tas_client_send_pl0(int sock, uint8_t con_id, uint32_t *pl0_buffer,
       (rsp_start.err != TAS_PL_ERR_NO_ERROR &&
        rsp_start.err != TAS_PL_ERR_PROTOCOL)) {
     uint8_t buf[packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st)];
-    recv(sock, buf, packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st), 0);
+    tas_sock_recv(sock, buf, packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st), 0);
     return ERROR_FAIL;
-  }
-  pl0_len = packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st) -
-            sizeof(tas_pl1rsp_pl0_end_st);
-  int err = recv(sock, pl0_buffer, MIN(pl0_len, 256 * 4), 0);
-  if (err < 0) {
+   }
+   pl0_len = packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st) -
+    	  sizeof(tas_pl1rsp_pl0_end_st);
+   int err = tas_sock_recv(sock, pl0_buffer, pl0_len, 0);
+   if (err < 0) {
     return ERROR_FAIL;
-  };
-  pl0_len -= err;
-
-  /* Don't overflow pl0 buffer in case of error */
-  while (pl0_len) {
+   };
+   pl0_len -= err;
+  
+   /* Don't overflow pl0 buffer in case of error */
+   while (pl0_len) {
     uint8_t buf[1024];
-    err = recv(sock, buf, MIN(1024, pl0_len), 0);
+    err = tas_sock_recv(sock, buf, MIN(1024, pl0_len), 0);
     if (err < 0) {
-      return ERROR_FAIL;
+    	return ERROR_FAIL;
     };
     pl0_len -= err;
-  }
-
-  if (recv(sock, &rsp_end, sizeof(tas_pl1rsp_pl0_end_st), 0) < 0) {
+   }
+  
+   if (tas_sock_recv(sock, &rsp_end, sizeof(tas_pl1rsp_pl0_end_st), 0) < 0) {
     return ERROR_FAIL;
   }
   if (rsp_end.cmd != TAS_PL1_CMD_PL0_END ||

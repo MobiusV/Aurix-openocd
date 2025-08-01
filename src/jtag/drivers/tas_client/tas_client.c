@@ -1,8 +1,6 @@
-#include <arpa/inet.h>
-#include <netinet/in.h>
 #include <string.h>
-#include <sys/socket.h>
 
+#include "tas_sock.h"
 #include "helper/command.h"
 #include "helper/list.h"
 #include "helper/log.h"
@@ -43,30 +41,23 @@ struct tas_client_state {
 static struct tas_client_state client_state;
 
 static int tas_client_init(void) {
-  struct sockaddr_in ipv4_sock_addr;
+	tas_sock_init();
 
-  if (client_state.ip_addr == NULL) {
-    client_state.ip_addr = "127.0.0.1";
-  }
-  if (inet_aton(client_state.ip_addr, &ipv4_sock_addr.sin_addr) == 0) {
-    LOG_ERROR("Invalid ip addr: %s", client_state.ip_addr);
-    return ERROR_INVALID_NUMBER;
-  }
-  ipv4_sock_addr.sin_family = AF_INET;
-  ipv4_sock_addr.sin_port = htons(24817);
+	if (client_state.ip_addr == NULL) {
+		client_state.ip_addr = "127.0.0.1";
+	}
 
-  LOG_INFO("Connecting to TAS server %s:%u", client_state.ip_addr, 24817);
-  client_state.sock = socket(AF_INET, SOCK_STREAM, 0);
-  if (client_state.sock == -1) {
-    return ERROR_FAIL;
-  }
+	LOG_INFO("Connecting to TAS server %s:%u", client_state.ip_addr, 24817);
+	client_state.sock = tas_sock_create();
+	if (client_state.sock < 0) {
+		return ERROR_FAIL;
+	}
 
-  if (connect(client_state.sock, (struct sockaddr *)&ipv4_sock_addr,
-              sizeof(struct sockaddr_in))) {
-    LOG_ERROR("Failed to connect to tas server %s: %s", client_state.ip_addr,
-              strerror(errno));
-    return ERROR_CONNECTION_REJECTED;
-  }
+	if (tas_sock_connect(client_state.sock, client_state.ip_addr, 24817) != 0) {
+		LOG_ERROR("Failed to connect to tas server %s: %d", client_state.ip_addr,
+				  tas_sock_get_last_error());
+		return ERROR_CONNECTION_REJECTED;
+	}
 
   if (tas_client_connect(client_state.sock) != 0) {
     LOG_ERROR("Failed to connect to TAS server");
@@ -84,9 +75,9 @@ static int tas_client_init(void) {
 }
 
 static int tas_client_quit(void) {
-
-  close(client_state.sock);
-  return 0;
+	tas_sock_close(client_state.sock);
+	tas_sock_cleanup();
+	return 0;
 }
 
 static int tas_client_reset(int trst, int srst) {

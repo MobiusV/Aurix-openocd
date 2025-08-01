@@ -20,6 +20,7 @@ AM_INIT_AUTOMAKE([-Wall -Wno-portability dist-bzip2 dist-zip subdir-objects])
 
 AC_CONFIG_HEADERS([config.h])
 
+
 AC_LANG([C])
 AC_PROG_CC
 # autoconf 2.70 obsoletes AC_PROG_CC_C99 and includes it in AC_PROG_CC

@@ -15,6 +15,7 @@
 
 #if HAVE_CAPSTONE
 
+#define CAPSTONE_AARCH64_COMPAT_HEADER
 #include <capstone.h>
 
 static void print_opcode(struct command_invocation *cmd, const cs_insn *insn)
