@@ -50,6 +50,7 @@ static int tas_client_init(void) {
 	LOG_INFO("Connecting to TAS server %s:%u", client_state.ip_addr, 24817);
 	client_state.sock = tas_sock_create();
 	if (client_state.sock < 0) {
+    LOG_INFO("Create Socket fail");
 		return ERROR_FAIL;
 	}
 
@@ -70,7 +71,7 @@ static int tas_client_init(void) {
     LOG_ERROR("Failed to receive targets");
     return ERROR_FAIL;
   }
-
+  LOG_INFO("Connect TAS server successful");
   return ERROR_OK;
 }
 

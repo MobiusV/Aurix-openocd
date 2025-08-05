@@ -59,7 +59,9 @@ int tas_client_session_start(int sock, const char *device, uint8_t con_id,
   rq_session_start.cmd = TAS_PL1_CMD_SESSION_START;
   rq_session_start.con_id = con_id;
   rq_session_start.client_type = TAS_CLIENT_TYPE_RW;
-  strncpy(rq_session_start.identifier, device, TAS_NAME_LEN64-1);
+  strncpy(rq_session_start.identifier, device, TAS_NAME_LEN64 - 1);
+    /* Ensure null termination */
+    rq_session_start.identifier[TAS_NAME_LEN64 - 1] = '\0';
   snprintf(rq_session_start.session_name, TAS_NAME_LEN16, "openocd%u", con_id);
   rq_session_start.session_pw[0] = 0;
 
@@ -182,7 +184,7 @@ int tas_client_get_targets(int sock, tas_target_info_st **targets,
     }
    }
 
-  return ERROR_OK;
+  return 0;
 }
 
 enum {
@@ -243,22 +245,33 @@ int tas_client_send_pl0(int sock, uint8_t con_id, uint32_t *pl0_buffer,
     tas_sock_recv(sock, buf, packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st), 0);
     return ERROR_FAIL;
    }
-   pl0_len = packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st) -
-    	  sizeof(tas_pl1rsp_pl0_end_st);
-   int err = tas_sock_recv(sock, pl0_buffer, pl0_len, 0);
+   size_t recv_pl0_len = packet_size - 4 - sizeof(tas_pl1rsp_pl0_start_st) -
+                         sizeof(tas_pl1rsp_pl0_end_st);
+
+   /* SECURITY: Read only up to the buffer's capacity to prevent overflow. */
+   size_t bytes_to_copy = MIN(recv_pl0_len, pl0_len);
+
+   int err = tas_sock_recv(sock, pl0_buffer, bytes_to_copy, 0);
    if (err < 0) {
-    return ERROR_FAIL;
+     return ERROR_FAIL;
    };
-   pl0_len -= err;
-  
-   /* Don't overflow pl0 buffer in case of error */
-   while (pl0_len) {
-    uint8_t buf[1024];
-    err = tas_sock_recv(sock, buf, MIN(1024, pl0_len), 0);
-    if (err < 0) {
-    	return ERROR_FAIL;
-    };
-    pl0_len -= err;
+
+   /* Drain any remaining data from the packet that didn't fit in the buffer. */
+   size_t remaining_bytes_in_packet = recv_pl0_len - err;
+   if (recv_pl0_len > pl0_len) {
+     LOG_WARNING("Server sent more data (%zu) than buffer capacity (%zu). Truncating.",
+                 recv_pl0_len, pl0_len);
+   }
+
+   while (remaining_bytes_in_packet > 0) {
+     uint8_t drain_buf[1024];
+     size_t bytes_to_drain = MIN(sizeof(drain_buf), remaining_bytes_in_packet);
+     int drain_err = tas_sock_recv(sock, drain_buf, bytes_to_drain, 0);
+     if (drain_err <= 0) {
+       LOG_ERROR("Socket error while draining packet.");
+       return ERROR_FAIL;
+     }
+     remaining_bytes_in_packet -= drain_err;
    }
   
    if (tas_sock_recv(sock, &rsp_end, sizeof(tas_pl1rsp_pl0_end_st), 0) < 0) {
